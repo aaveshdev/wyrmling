@@ -1,0 +1,22 @@
+<svg width="480" height="140" viewBox="0 0 480 140" xmlns="http://www.w3.org/2000/svg">
+  <path d="M30 90 Q70 20 110 70 T190 60"
+        fill="none"
+        stroke="#6366f1"
+        stroke-width="3"
+        stroke-linecap="round"/>
+  <circle cx="85" cy="55" r="3" fill="#6366f1"/>
+  <text x="210" y="65"
+        font-family="Segoe UI, sans-serif"
+        font-size="36"
+        font-weight="700"
+        fill="currentColor">
+        Wyrmling
+  </text>
+  <text x="210" y="90"
+        font-family="Segoe UI, sans-serif"
+        font-size="14"
+        font-weight="500"
+        fill="currentColor">
+        Autonomous AI Agent
+  </text>
+</svg>
