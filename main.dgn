@@ -1,0 +1,31 @@
+import "time"
+import "os"
+import "logger"
+import "config"
+import "server"
+
+logger.banner("Wyrmling - Autonomous Agent");
+
+
+var cfg = config.load();
+var agent_cfg = cfg.get("agent");
+var prov = config.active_provider();
+
+logger.info("OS:           " + os.name());
+logger.info("Working dir:  " + os.cwd());
+logger.info("Agent name:   " + str(agent_cfg.get("name")));
+logger.info("Provider:     " + str(prov.get("label")) + "  (" + str(prov.get("kind")) + ")");
+logger.info("Model:        " + str(prov.get("model")));
+logger.info("Endpoint:     " + str(prov.get("base_url")));
+logger.info("Max steps:    " + str(agent_cfg.get("max_steps")));
+logger.info("Temperature:  " + str(agent_cfg.get("temperature")));
+
+var port = server.start();
+
+logger.ok("Server listening on http://localhost:" + str(port));
+logger.info("Open the UI in your browser, or curl /api/health to test.");
+logger.info("Press Ctrl+C to stop.");
+
+while (True) {
+    time.sleep_ms(1000);
+}

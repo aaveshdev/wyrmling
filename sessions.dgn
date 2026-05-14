@@ -1,0 +1,127 @@
+import "file"
+import "json"
+import "time"
+import "uuid"
+
+var SESSIONS_FILE = "wyrm_sessions.json";
+
+func _load_all() {
+    if (not file.exists(SESSIONS_FILE)) { return {}; }
+    var raw = file.read_all(SESSIONS_FILE);
+    if (raw == null or raw == "") { return {}; }
+    return json.decode(raw) ?? {};
+}
+
+func _save_all(store) {
+    file.write(SESSIONS_FILE, json.encode(store));
+}
+
+func now_ms() {
+    return int(time.now() * 1000);
+}
+
+func create() {
+    var store = _load_all();
+    var id = uuid.v4();
+    var session = {
+        "id": id,
+        "title": "New Chat",
+        "created_at": now_ms(),
+        "updated_at": now_ms(),
+        "messages": []  
+    };
+    store.set(id, session);
+    _save_all(store);
+    return id;
+}
+
+func get(id) {
+    var store = _load_all();
+    if (not store.contains(id)) { return null; }
+    return store.get(id);
+}
+
+func exists(id) {
+    var store = _load_all();
+    return store.contains(id);
+}
+
+func get_messages(id) {
+    var s = get(id);
+    if (s == null) { return []; }
+    return s.get("messages") ?? [];
+}
+
+func set_messages(id, msgs) {
+    var store = _load_all();
+    if (not store.contains(id)) { return False; }
+    var s = store.get(id);
+    s.set("messages", msgs);
+    s.set("updated_at", now_ms());
+    _save_all(store);
+    return True;
+}
+
+func append_message(id, msg) {
+    var msgs = get_messages(id);
+    msgs.push(msg);
+    set_messages(id, msgs);
+}
+
+func maybe_set_title(id, first_user_msg) {
+    var store = _load_all();
+    if (not store.contains(id)) { return; }
+    var s = store.get(id);
+    if (s.get("title") != "New Chat") { return; }
+    var t = str(first_user_msg);
+    if (len(t) > 60) { t = t.substring(0, 57) + "..."; }
+    s.set("title", t);
+    _save_all(store);
+}
+
+func rename(id, new_title) {
+    var store = _load_all();
+    if (not store.contains(id)) { return False; }
+    store.get(id).set("title", str(new_title));
+    _save_all(store);
+    return True;
+}
+
+func delete(id) {
+    var store = _load_all();
+    if (store.contains(id)) {
+        store.remove(id);
+        _save_all(store);
+        return True;
+    }
+    return False;
+}
+
+func list_summaries() {
+    var store = _load_all();
+    var arr = [];
+    for k in store.keys() {
+        var s = store.get(k);
+        arr.push({
+            "id": s.get("id"),
+            "title": s.get("title"),
+            "created_at": s.get("created_at") ?? 0,
+            "updated_at": s.get("updated_at") ?? 0,
+            "message_count": len(s.get("messages") ?? [])
+        });
+    }
+    
+    var n = len(arr);
+    var i = 1;
+    while (i < n) {
+        var cur = arr[i];
+        var j = i - 1;
+        while (j >= 0 and (arr[j].get("updated_at") ?? 0) < (cur.get("updated_at") ?? 0)) {
+            arr[j + 1] = arr[j];
+            j = j - 1;
+        }
+        arr[j + 1] = cur;
+        i = i + 1;
+    }
+    return arr;
+}

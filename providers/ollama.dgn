@@ -1,0 +1,116 @@
+import "json"
+import "net"
+
+
+func format_tools(tools) {
+    var out = [];
+    for t in tools {
+        out.push({
+            "type": "function",
+            "function": {
+                "name": t.get("name"),
+                "description": t.get("description"),
+                "parameters": t.get("parameters")
+            }
+        });
+    }
+    return out;
+}
+
+func format_messages(messages) {
+    var out = [];
+    for m in messages {
+        var role = m.get("role");
+
+        if (role == "tool") {
+            out.push({
+                "role": "user",
+                "content": "[Tool result: " + str(m.get("name") ?? "unknown") + "]\n" + str(m.get("content") ?? "")
+            });
+            continue;
+        }
+
+        if (role == "assistant") {
+            var content = m.get("content") ?? "";
+            if (m.contains("tool_calls") and m.get("tool_calls") != null) {
+                var tc_list = m.get("tool_calls");
+                var summary = "[I called these tools:";
+                for tc in tc_list {
+                    var fn = tc.get("function") ?? {};
+                    summary = summary + " " + str(fn.get("name") ?? "?") + "(" + str(fn.get("arguments") ?? "") + ")";
+                }
+                summary = summary + "]";
+                if (content == "") {
+                    content = summary;
+                } else {
+                    content = summary + "\n" + content;
+                }
+            }
+            out.push({ "role": "assistant", "content": content });
+            continue;
+        }
+
+        out.push(m);
+    }
+    return out;
+}
+
+async func chat(messages, tools, provider_cfg, agent_cfg) {
+    var base = provider_cfg.get("base_url");
+    if (base.ends_with("/")) { base = base.substring(0, len(base) - 1); }
+    var url = base + "/api/chat";
+
+    var body = {
+        "model": provider_cfg.get("model"),
+        "messages": format_messages(messages),
+        "stream": False,
+        "options": {
+            "temperature": float(agent_cfg.get("temperature") ?? 0.7),
+            "num_predict": int(agent_cfg.get("max_tokens") ?? 2048)
+        }
+    };
+
+    if (tools != null and len(tools) > 0) {
+        body.set("tools", format_tools(tools));
+    }
+
+    var headers = { "Content-Type": "application/json" };
+    var res = await net.http_post(url, json.encode(body), headers);
+    if (res.get("status") != 200) {
+        return {
+            "error": "Ollama HTTP " + str(res.get("status")) + ": " + str(res.get("body")),
+            "text": "",
+            "tool_calls": []
+        };
+    }
+
+    var data = json.decode(res.get("body"));
+    if (data == null) {
+        return { "error": "Could not decode Ollama response", "text": "", "tool_calls": [] };
+    }
+    var msg = data.get("message");
+    if (msg == null) {
+        return { "error": "Ollama response missing 'message' field", "text": "", "tool_calls": [] };
+    }
+
+    var text = msg.get("content") ?? "";
+    var calls = [];
+    if (msg.contains("tool_calls") and msg.get("tool_calls") != null) {
+        var i = 0;
+        for c in msg.get("tool_calls") {
+            var cid = c.get("id");
+            if (cid == null or cid == "") {
+                cid = "ollama_call_" + str(int(i));
+            }
+            var fn = c.get("function") ?? {};
+            calls.push({
+                "id": cid,
+                "name": fn.get("name") ?? "",
+                "args": fn.get("arguments") ?? {}
+            });
+            i = i + 1;
+        }
+    }
+
+    return { "error": null, "text": text, "tool_calls": calls, "raw": data };
+}

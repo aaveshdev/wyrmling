@@ -1,0 +1,470 @@
+import "os"
+import "file"
+import "json"
+import "net"
+import "time"
+import "path" as pt
+import "ffi"
+import "math"
+
+import "../config" as config
+import "../memory" as mem
+import "../logger" as logger
+
+
+var SYSTEM_OS = os.name();
+var IS_WINDOWS = SYSTEM_OS == "windows";
+var user32 = null;
+if (IS_WINDOWS) {
+    try {
+        user32 = ffi.loadlib("user32.dll");
+        ffi.def(user32, "SetCursorPos", "bool", ["int", "int"]);
+        ffi.def(user32, "mouse_event", "void", ["int", "int", "int", "int", "int"]);
+    } catch (e) {
+        logger.warn("Failed to load user32.dll - mouse control disabled");
+        user32 = null;
+    }
+}
+var MOUSEEVENTF_LEFTDOWN  = 2;
+var MOUSEEVENTF_LEFTUP    = 4;
+var MOUSEEVENTF_RIGHTDOWN = 8;
+var MOUSEEVENTF_RIGHTUP   = 16;
+
+
+var ALL_SCHEMAS = [
+    {
+        "name": "run_shell",
+        "description": "Execute a single shell/terminal command and return stdout+stderr. Use to install packages, list files, run system tasks, or invoke other CLIs.",
+        "parameters": {
+            "type": "object",
+            "properties": { "cmd": { "type": "string", "description": "The shell command to run" } },
+            "required": ["cmd"]
+        }
+    },
+    {
+        "name": "run_python",
+        "description": "Execute Python source code and return its stdout/stderr. Use for data work, GUI automation with pyautogui, or any logic that's easier to write in Python.",
+        "parameters": {
+            "type": "object",
+            "properties": { "code": { "type": "string", "description": "Raw Python source to execute" } },
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "read_file",
+        "description": "Read the contents of a text file. Returns up to 4000 chars; large files are truncated.",
+        "parameters": {
+            "type": "object",
+            "properties": { "filepath": { "type": "string" } },
+            "required": ["filepath"]
+        }
+    },
+    {
+        "name": "write_file",
+        "description": "Create or overwrite a file with the given contents.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filepath": { "type": "string" },
+                "content":  { "type": "string" }
+            },
+            "required": ["filepath", "content"]
+        }
+    },
+    {
+        "name": "list_dir",
+        "description": "List files and folders inside a directory. Pass empty string for current working directory.",
+        "parameters": {
+            "type": "object",
+            "properties": { "dir_path": { "type": "string" } },
+            "required": ["dir_path"]
+        }
+    },
+    {
+        "name": "delete_file",
+        "description": "Permanently delete a file. Cannot be undone.",
+        "parameters": {
+            "type": "object",
+            "properties": { "filepath": { "type": "string" } },
+            "required": ["filepath"]
+        }
+    },
+    {
+        "name": "web_search",
+        "description": "Search the web for CURRENT EVENTS, NEWS, or facts dated after your training cutoff. NEVER use this for definitions, identity questions ('who are you'), basic facts, math, or anything you already know. If you can answer from general knowledge, DO NOT use this tool.",
+        "parameters": {
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "fetch_url",
+        "description": "Fetch a URL and return its visible text content (HTML stripped). Use to read articles, docs, or links from search results.",
+        "parameters": {
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "core_memory_append",
+        "description": "Save a durable fact (user name, preference, project detail) so it persists across conversations and is auto-included in your system prompt.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key":   { "type": "string", "description": "Short label like 'User Name' or 'Preferred Language'" },
+                "value": { "type": "string", "description": "The fact to remember" }
+            },
+            "required": ["key", "value"]
+        }
+    },
+    {
+        "name": "core_memory_remove",
+        "description": "Forget a fact previously saved with core_memory_append.",
+        "parameters": {
+            "type": "object",
+            "properties": { "key": { "type": "string" } },
+            "required": ["key"]
+        }
+    },
+    {
+        "name": "move_mouse",
+        "description": "Move the OS cursor to absolute screen coordinates (x, y). Windows-only via user32.dll.",
+        "parameters": {
+            "type": "object",
+            "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
+            "required": ["x", "y"]
+        }
+    },
+    {
+        "name": "click_mouse",
+        "description": "Click the mouse at its current position. button must be 'left' or 'right'.",
+        "parameters": {
+            "type": "object",
+            "properties": { "button": { "type": "string", "enum": ["left", "right"] } },
+            "required": ["button"]
+        }
+    },
+    {
+        "name": "type_text",
+        "description": "Type a string of text via simulated keyboard. Uses pyautogui under the hood.",
+        "parameters": {
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"]
+        }
+    },
+    {
+        "name": "press_key",
+        "description": "Press one key by name (e.g. 'enter', 'tab', 'esc', 'win'). Uses pyautogui.",
+        "parameters": {
+            "type": "object",
+            "properties": { "key": { "type": "string" } },
+            "required": ["key"]
+        }
+    },
+    {
+        "name": "see_screen",
+        "description": "Take a screenshot of the user's display and analyze it with a local Ollama vision model (llama3.2-vision). Use when you need to see what's on screen, find a button, or verify a click landed correctly.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+    },
+    {
+        "name": "get_time",
+        "description": "Return the current local date and time as a string.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+    },
+    {
+        "name": "calculator",
+        "description": "Evaluate a math expression and return the numeric result. Supports + - * / and parentheses.",
+        "parameters": {
+            "type": "object",
+            "properties": { "expression": { "type": "string" } },
+            "required": ["expression"]
+        }
+    }
+];
+
+
+func enabled_schemas() {
+    var c = config.get();
+    var tool_cfg = c.get("tools");
+    var out = [];
+    for s in ALL_SCHEMAS {
+        var n = s.get("name");
+        if (tool_cfg.contains(n) and tool_cfg.get(n) == True) {
+            out.push(s);
+        }
+    }
+    return out;
+}
+
+func is_enabled(name) {
+    var c = config.get();
+    var tool_cfg = c.get("tools");
+    if (not tool_cfg.contains(name)) { return False; }
+    return tool_cfg.get(name) == True;
+}
+
+
+
+func _truncate(s, max_len) {
+    if (s == null) { return ""; }
+    if (len(s) > max_len) {
+        return s.substring(0, max_len) + "\n...[TRUNCATED " + str(len(s) - max_len) + " chars]";
+    }
+    return s;
+}
+
+func _run_shell(cmd) {
+    if (cmd == null or cmd == "") { return "Error: command empty"; }
+    logger.tool("shell> " + cmd);
+    var tmp = ".wyrm_tmp.txt";
+    if (file.exists(tmp)) { file.delete(tmp); }
+
+    var full_cmd = "";
+    if (IS_WINDOWS) {
+
+        full_cmd = "cmd /c chcp 65001 >nul 2>&1 && (" + cmd + ") > " + tmp + " 2>&1";
+    } else {
+        full_cmd = "(" + cmd + ") > " + tmp + " 2>&1";
+    }
+
+    var exit_code = os.system(full_cmd);
+
+    var output = "";
+    if (file.exists(tmp)) {
+        output = file.read_all(tmp) ?? "";
+        file.delete(tmp);
+    }
+
+    if (len(output) > 8000) {
+        output = output.substring(0, 8000) + "\n...[TRUNCATED at 8000 chars]";
+    }
+
+
+    if (output != "") {
+        var bad_re = regex("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]");
+        output = bad_re.replace(output, "");
+    }
+
+    return "Exit Code: " + str(exit_code) + "\nOutput:\n" + output;
+}
+
+func _run_python(code) {
+    if (code == null or code == "") { return "Error: empty code"; }
+    logger.tool("python> [" + str(len(code)) + " chars]");
+    var tmp_py = ".wyrm_tmp.py";
+    file.write(tmp_py, code);
+    var res = _run_shell("python " + tmp_py);
+    if (file.exists(tmp_py)) { file.delete(tmp_py); }
+    return res;
+}
+
+func _read_file(filepath) {
+    filepath = str(filepath);
+    if (filepath == null or filepath == "") { return "Error: empty path"; }
+    logger.tool("read> " + filepath);
+    if (not file.exists(filepath)) { return "Error: file does not exist: " + filepath; }
+    var content = file.read_all(filepath) ?? "";
+    return _truncate(content, 4000);
+}
+
+func _write_file(filepath, content) {
+    filepath = str(filepath);
+    content = str(content ?? "");
+    if (filepath == null or filepath == "") { return "Error: empty path"; }
+    logger.tool("write> " + filepath + " (" + str(len(content)) + " chars)");
+    if (not filepath.contains("\\") and not filepath.contains("/")) {
+        filepath = pt.join(os.cwd(), filepath);
+    }
+    var ok = file.write(filepath, content);
+    return ok ? ("Success: written to " + filepath) : "Error writing file";
+}
+
+func _list_dir(dir_path) {
+    if (dir_path == null or dir_path == "") { dir_path = os.cwd(); }
+    dir_path = str(dir_path);
+    logger.tool("ls> " + dir_path);
+    try {
+        var files = os.listdir(dir_path);
+        if (files == null) { return "Error: cannot read directory: " + dir_path; }
+        if (len(files) == 0) { return "(directory is empty: " + dir_path + ")"; }
+        return "Contents of " + dir_path + ":\n" + files.join("\n");
+    } catch (e) {
+        return "Error reading " + dir_path + ": " + str(e);
+    }
+}
+
+func _delete_file(filepath) {
+    filepath = str(filepath);
+    if (filepath == null or filepath == "") { return "Error: empty path"; }
+    logger.tool("rm> " + filepath);
+    if (not file.exists(filepath)) { return "File not found, nothing to delete."; }
+    var ok = file.delete(filepath);
+    return ok ? ("Success: deleted " + filepath) : "Error deleting file";
+}
+
+async func _fetch_url(url) {
+    if (url == null or url == "") { return "Error: URL is empty"; }
+    logger.tool("fetch> " + url);
+    var res = await net.http_get(url);
+    if (res.get("status") != 200) {
+        return "Error: HTTP " + str(res.get("status")) + "\n" + (res.get("body") ?? "");
+    }
+    var body = res.get("body") ?? "";
+    var tag_re = regex("<[^>]*>");
+    var text = tag_re.replace(body, " ");
+    var space_re = regex("\\s+");
+    text = space_re.replace(text, " ");
+    return _truncate(text, 4000);
+}
+
+async func _web_search(query) {
+    if (query == null or query == "") { return "Error: query empty"; }
+    logger.tool("search> " + query);
+    var space_re = regex(" ");
+    var q = space_re.replace(query, "+");
+    var url = "https://lite.duckduckgo.com/lite/?q=" + q;
+    return await _fetch_url(url);
+}
+
+func _move_mouse(x, y) {
+    if (not IS_WINDOWS or user32 == null) {
+        return "Error: mouse control only supported on Windows with user32.dll loaded";
+    }
+    logger.tool("mouse> " + str(x) + ", " + str(y));
+    var ok = ffi.call(user32, "SetCursorPos", int(x), int(y));
+    return ok ? "Success: moved cursor" : "Error: SetCursorPos failed";
+}
+
+func _click_mouse(button) {
+    if (not IS_WINDOWS or user32 == null) {
+        return "Error: mouse control only supported on Windows with user32.dll loaded";
+    }
+    logger.tool("click> " + str(button));
+    if (button == "left") {
+        ffi.call(user32, "mouse_event", MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        ffi.call(user32, "mouse_event", MOUSEEVENTF_LEFTUP,   0, 0, 0, 0);
+        return "Success: left click";
+    }
+    if (button == "right") {
+        ffi.call(user32, "mouse_event", MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+        ffi.call(user32, "mouse_event", MOUSEEVENTF_RIGHTUP,   0, 0, 0, 0);
+        return "Success: right click";
+    }
+    return "Error: button must be 'left' or 'right'";
+}
+
+func _type_text(text) {
+    if (text == null) { return "Error: empty text"; }
+    logger.tool("type> " + str(len(text)) + " chars");
+    var py = "import pyautogui\npyautogui.write(" + json.encode(str(text)) + ", interval=0.02)\nprint('typed')\n";
+    return _run_python(py);
+}
+
+func _press_key(key) {
+    if (key == null or key == "") { return "Error: empty key"; }
+    logger.tool("press> " + str(key));
+    var py = "import pyautogui\npyautogui.press(" + json.encode(str(key)) + ")\nprint('pressed')\n";
+    return _run_python(py);
+}
+
+
+func _see_screen() {
+    logger.tool("vision> screenshot + analyze");
+    var c = config.get();
+    var oll = c.get("providers").get("ollama");
+    var base = oll.get("base_url") ?? "http://localhost:11434";
+    if (base.ends_with("/")) { base = base.substring(0, len(base) - 1); }
+    var endpoint = base + "/api/generate";
+
+    var lines = [
+        "import urllib.request, json, base64",
+        "from PIL import ImageGrab",
+        "try:",
+        "    img = ImageGrab.grab()",
+        "    img.thumbnail((1024, 1024))",
+        "    img.save('.wyrm_screen.jpg', format='JPEG')",
+        "    with open('.wyrm_screen.jpg', 'rb') as f:",
+        "        b64 = base64.b64encode(f.read()).decode('utf-8')",
+        "    data = {",
+        "        'model': 'llama3.2-vision:11b',",
+        "        'prompt': 'You are the eyes of an autonomous AI. Describe exactly what is on this screen. List open applications, text you can read, and where things are located.',",
+        "        'images': [b64],",
+        "        'stream': False",
+        "    }",
+        "    req = urllib.request.Request(" + json.encode(endpoint) + ", data=json.dumps(data).encode('utf-8'), headers={'Content-Type': 'application/json'})",
+        "    response = urllib.request.urlopen(req, timeout=120)",
+        "    result = json.loads(response.read())",
+        "    print('SCREENSHOT ANALYSIS:')",
+        "    print(result.get('response', 'No response from vision model.'))",
+        "except Exception as e:",
+        "    print('Vision Error:', e)"
+    ];
+    var py = lines.join("\n");
+    var tmp_py = ".wyrm_vision.py";
+    file.write(tmp_py, py);
+    var output = _run_shell("python " + tmp_py);
+    if (file.exists(tmp_py)) { file.delete(tmp_py); }
+    if (file.exists(".wyrm_screen.jpg")) { file.delete(".wyrm_screen.jpg"); }
+    return output;
+}
+
+func _get_time() {
+    var d = time.date_now();
+    return "Current local time: " + d.get("str");
+}
+
+
+func _calculator(expression) {
+    if (expression == null or expression == "") { return "Error: empty expression"; }
+    var expr = str(expression);
+    // whitelist: digits, operators, parens, dot, space, ** (power), %
+    var bad_re = regex("[^0-9+\\-*/().% ]");
+    var sanitized = bad_re.replace(expr, "");
+    if (sanitized == "") { return "Error: expression contained no valid math characters"; }
+    var py = "result = (" + sanitized + ")\nprint('=', result)\n";
+    var out = _run_python(py);
+    return expr + " => " + out;
+}
+
+
+
+async func execute(name, args) {
+    if (typeof(args) == "string") {
+        var decoded = json.decode(args);
+        if (decoded != null) { args = decoded; } else { args = {}; }
+    }
+    if (args == null) { args = {}; }
+
+    if (not is_enabled(name)) {
+        return "Tool '" + name + "' is currently disabled in settings.";
+    }
+
+    if (name == "run_shell")          { return _run_shell(args.get("cmd")); }
+    if (name == "run_python")         { return _run_python(args.get("code")); }
+    if (name == "read_file")          { return _read_file(args.get("filepath")); }
+    if (name == "write_file")         { return _write_file(args.get("filepath"), args.get("content")); }
+    if (name == "list_dir")           { return _list_dir(args.get("dir_path")); }
+    if (name == "delete_file")        { return _delete_file(args.get("filepath")); }
+    if (name == "web_search")         { return await _web_search(args.get("query")); }
+    if (name == "fetch_url")          { return await _fetch_url(args.get("url")); }
+    if (name == "core_memory_append") {
+        var ok = mem.append(args.get("key"), args.get("value"));
+        return ok ? ("Remembered: " + str(args.get("key"))) : "Error: missing key/value";
+    }
+    if (name == "core_memory_remove") {
+        var ok = mem.remove(args.get("key"));
+        return ok ? ("Forgot: " + str(args.get("key"))) : "Fact not found in memory.";
+    }
+    if (name == "move_mouse")  { return _move_mouse(args.get("x"), args.get("y")); }
+    if (name == "click_mouse") { return _click_mouse(args.get("button")); }
+    if (name == "type_text")   { return _type_text(args.get("text")); }
+    if (name == "press_key")   { return _press_key(args.get("key")); }
+    if (name == "see_screen")  { return _see_screen(); }
+    if (name == "get_time")    { return _get_time(); }
+    if (name == "calculator")  { return _calculator(args.get("expression")); }
+
+    return "Unknown tool: " + str(name);
+}

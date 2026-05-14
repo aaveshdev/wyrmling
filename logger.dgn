@@ -1,0 +1,26 @@
+var ESC = chr(27);
+var ANSI_RESET   = ESC + "[0m";
+var ANSI_DIM     = ESC + "[2m";
+var ANSI_BOLD    = ESC + "[1m";
+var ANSI_RED     = ESC + "[31m";
+var ANSI_GREEN   = ESC + "[32m";
+var ANSI_YELLOW  = ESC + "[33m";
+var ANSI_BLUE    = ESC + "[34m";
+var ANSI_MAGENTA = ESC + "[35m";
+var ANSI_CYAN    = ESC + "[36m";
+
+func info(msg)  { showln(ANSI_CYAN    + "[INFO] " + ANSI_RESET + str(msg)); }
+func warn(msg)  { showln(ANSI_YELLOW  + "[WARN] " + ANSI_RESET + str(msg)); }
+func error(msg) { showln(ANSI_RED     + "[ERR ] " + ANSI_RESET + str(msg)); }
+func ok(msg)    { showln(ANSI_GREEN   + "[ OK ] " + ANSI_RESET + str(msg)); }
+func tool(msg)  { showln(ANSI_MAGENTA + "  [tool] " + ANSI_RESET + str(msg)); }
+func agent(msg) { showln(ANSI_BLUE + ANSI_BOLD + "[agent] " + ANSI_RESET + str(msg)); }
+func user(msg)  { showln(ANSI_GREEN + ANSI_BOLD + "[user] " + ANSI_RESET + str(msg)); }
+
+func banner(text) {
+    var line = "=========================================================";
+    showln("");
+    showln(ANSI_CYAN + line + ANSI_RESET);
+    showln(ANSI_CYAN + ANSI_BOLD + "  " + str(text) + ANSI_RESET);
+    showln(ANSI_CYAN + line + ANSI_RESET);
+}

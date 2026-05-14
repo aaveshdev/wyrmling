@@ -1,0 +1,226 @@
+import "os"
+import "json"
+import "config"
+import "memory" as mem
+import "sessions"
+import "logger"
+import "providers/router" as router
+import "tools/registry" as tools
+
+
+func build_system_prompt() {
+    var c = config.get();
+    var agent_cfg = c.get("agent");
+    var name = agent_cfg.get("name") ?? "Wyrmling";
+    var extra = agent_cfg.get("system_prompt_extra") ?? "";
+
+    var lines = [];
+    lines.push("You are " + name + ", a highly capable autonomous agent.");
+    lines.push("Operating system: " + os.name());
+    lines.push("Current working directory: " + os.cwd());
+    lines.push("");
+    lines.push("--- YOUR CORE MEMORY ---");
+    lines.push("(These facts are auto-injected. Do NOT use read_file to look them up.)");
+    lines.push(mem.render());
+    lines.push("------------------------");
+    lines.push("");
+    lines.push("CRITICAL RULES - READ CAREFULLY:");
+    lines.push("");
+    lines.push("RULE 1 (MOST IMPORTANT): For greetings ('hi', 'hello', 'hey', 'what's up'), small talk, simple questions you already know the answer to, or anything conversational, you MUST reply with PLAIN TEXT and CALL ZERO TOOLS. Do NOT call type_text, click_mouse, run_shell, or any other tool. Just write your text reply.");
+    lines.push("");
+    lines.push("RULE 2: type_text, press_key, move_mouse, click_mouse simulate REAL keyboard/mouse events on the user's actual computer. They are ONLY for when the user explicitly asks you to control the screen (e.g. 'open notepad and type X', 'click the start button'). NEVER use them to 'reply' or 'output' text - your reply goes in your message content, not into the keyboard.");
+    lines.push("");
+    lines.push("RULE 3: Use a tool ONLY when the user's request cannot be answered without it. If unsure, prefer plain text reply.");
+    lines.push("");
+    lines.push("EXAMPLES OF QUESTIONS YOU ANSWER WITHOUT ANY TOOL:");
+    lines.push("  User: 'hi' / 'hello' / 'hey'  -> 'Hello! How can I help?' (NO TOOL)");
+    lines.push("  User: 'who are you?'  -> 'I am " + name + ", an autonomous AI agent that can run commands, browse the web, and control your computer when you ask.' (NO TOOL)");
+    lines.push("  User: 'what can you do?'  -> describe your capabilities in plain text (NO TOOL)");
+    lines.push("  User: 'what is 2+2'  -> '4' (NO TOOL)");
+    lines.push("  User: 'what is python?'  -> answer from general knowledge (NO TOOL)");
+    lines.push("  User: 'thanks'  -> 'You're welcome!' (NO TOOL)");
+    lines.push("");
+    lines.push("EXAMPLES WHERE YOU DO USE TOOLS:");
+    lines.push("  User: 'what's in C:/Users/aaves'  -> use list_dir(\"C:/Users/aaves\")");
+    lines.push("  User: 'who won the latest f1 race'  -> use web_search (current event)");
+    lines.push("  User: 'open notepad'  -> use run_shell with 'start notepad'");
+    lines.push("  User: 'remember my name is Alex'  -> use core_memory_append");
+    lines.push("  User: 'tell me about system details' / 'system info' / 'what cpu do I have'");
+    lines.push("    -> on Windows use run_shell('systeminfo'), on Linux/Mac use run_shell('uname -a && lscpu')");
+    lines.push("  User: 'what's my IP'  -> run_shell('ipconfig') on Windows or run_shell('ifconfig') elsewhere");
+    lines.push("");
+    lines.push("PICK THE RIGHT TOOL: 'system details' is NOT a list_dir question. list_dir is ONLY for showing files in a folder. For system/hardware/OS info, run_shell with 'systeminfo' (Windows) or 'uname -a' (Unix).");
+    lines.push("");
+    lines.push("RULE 4: Use 'core_memory_append' for durable facts about the user. Memories above are already injected - do not 'check' or 'read' them.");
+    lines.push("");
+    lines.push("RULE 5: When reading a file, include its content in your reply, not just 'done'.");
+    lines.push("");
+    lines.push("RULE 6: Never paste raw Python in your message. To run code, call run_python.");
+    lines.push("");
+    lines.push("RULE 7: Do not output raw JSON tool-call blocks in your text. Use the API's native tool_calls field.");
+
+    if (extra != null and extra != "") {
+        lines.push("");
+        lines.push("--- USER EXTRA INSTRUCTIONS ---");
+        lines.push(extra);
+    }
+
+    return lines.join("\n");
+}
+
+
+func trim_history(messages, max_keep) {
+    while (len(messages) > max_keep) {
+        if (len(messages) > 1) {
+            messages.remove_at(1);
+        } else { break; }
+    }
+}
+
+
+async func run(session_id, user_text) {
+    var c = config.get();
+    var agent_cfg = c.get("agent");
+    var max_steps = int(agent_cfg.get("max_steps") ?? 15);
+    var ctx_window = int(agent_cfg.get("context_window") ?? 30);
+
+    var prov = config.active_provider();
+    if (prov == null) {
+        return {
+            "final": "Error: no active provider configured. Open Settings.",
+            "steps": []
+        };
+    }
+
+    sessions.maybe_set_title(session_id, user_text);
+
+    var raw = sessions.get_messages(session_id);
+    if (len(raw) == 0) {
+        raw.push({ "role": "system", "content": build_system_prompt() });
+    } else {
+        raw[0] = { "role": "system", "content": build_system_prompt() };
+    }
+    raw.push({ "role": "user", "content": str(user_text) });
+
+    var trace = [];
+    var step = 0;
+    var final_text = "";
+    var done = False;
+
+    while (not done and step < max_steps) {
+        step = step + 1;
+        trim_history(raw, ctx_window);
+
+        var schemas = tools.enabled_schemas();
+        var resp = await router.chat(raw, schemas, prov, agent_cfg);
+
+        if (resp.get("error") != null) {
+            var err = resp.get("error");
+            logger.error("Provider error: " + str(err));
+            trace.push({ "kind": "error", "message": str(err), "step": step });
+            final_text = "[Provider Error] " + str(err);
+            done = True;
+            break;
+        }
+
+        var text = resp.get("text") ?? "";
+        var calls = resp.get("tool_calls") ?? [];
+
+        if (len(calls) == 0 and text != "" and text.contains("{") and text.contains("}")) {
+            var looks_like_call = text.contains("\"name\"") and (text.contains("\"parameters\"") or text.contains("\"arguments\""));
+            if (looks_like_call) {
+                logger.warn("model emitted JSON tool call in content, retrying with correction");
+                raw.push({ "role": "assistant", "content": text });
+                raw.push({
+                    "role": "user",
+                    "content": "STOP. You output a JSON tool-call block in your text reply. That is wrong. Either (a) use the native tool_calls API field, or (b) just answer the user in plain natural language with NO JSON. The user said 'hi' - just say hello back in plain text. Try again."
+                });
+                continue;
+            }
+        }
+
+        var asst_msg = { "role": "assistant", "content": text };
+
+        if (len(calls) > 0) {
+            var tc = [];
+            for c2 in calls {
+                var args_for_history = c2.get("args");
+                if (typeof(args_for_history) != "string") {
+                    args_for_history = json.encode(args_for_history);
+                }
+                tc.push({
+                    "id": c2.get("id"),
+                    "function": {
+                        "name": c2.get("name"),
+                        "arguments": args_for_history
+                    }
+                });
+            }
+            asst_msg.set("tool_calls", tc);
+        }
+        raw.push(asst_msg);
+
+        if (text != null and text != "") {
+            trace.push({ "kind": "thought", "text": text, "step": step });
+        }
+
+        if (len(calls) == 0) {
+            final_text = text;
+            done = True;
+            break;
+        }
+
+        for c3 in calls {
+            var name = c3.get("name");
+            var args = c3.get("args");
+            var cid  = c3.get("id");
+
+            trace.push({
+                "kind": "tool_call",
+                "step": step,
+                "id": cid,
+                "name": name,
+                "args": args
+            });
+
+            var result = null;
+            try {
+                result = await tools.execute(name, args);
+            } catch (e) {
+                result = "Tool exception: " + str(e);
+            }
+            if (result == null) {
+                result = "Tool returned null (no output).";
+            }
+            result = str(result);
+
+            trace.push({
+                "kind": "tool_result",
+                "step": step,
+                "id": cid,
+                "name": name,
+                "result": str(result)
+            });
+
+            raw.push({
+                "role": "tool",
+                "tool_call_id": cid,
+                "name": name,
+                "content": str(result)
+            });
+        }
+    }
+
+    if (step >= max_steps and not done) {
+        final_text = "[stopped] Reached max_steps (" + str(max_steps) + "). " + final_text;
+        trace.push({ "kind": "error", "message": "max_steps reached", "step": step });
+    }
+
+    sessions.set_messages(session_id, raw);
+
+    return { "final": final_text, "steps": trace };
+}
+
+func clear_history(session_id) {
+    sessions.set_messages(session_id, []);
+}

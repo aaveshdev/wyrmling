@@ -1,0 +1,157 @@
+import "file"
+import "json"
+import "logger"
+import "uuid"
+
+var CONFIG_PATH = "config.json";
+
+func default_config() {
+    return {
+        "server": { "port": 8080, "host": "0.0.0.0" },
+        "security": {
+            "enabled": True,
+            "username": "admin",
+            "password": "admin",
+            "token": "wyrm_" + uuid.v4()
+        },
+        "agent": {
+            "name": "Wyrmling",
+            "max_steps": 15,
+            "context_window": 30,
+            "active_provider": "ollama",
+            "temperature": 0.7,
+            "max_tokens": 2048,
+            "system_prompt_extra": "",
+            "theme": "dark"
+        },
+        "providers": {
+            "ollama": {
+                "label": "Ollama (Local)",
+                "base_url": "http://localhost:11434",
+                "model": "qwen2.5:7b",
+                "api_key": "",
+                "kind": "ollama"
+            },
+            "openai": {
+                "label": "OpenAI",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+                "api_key": "",
+                "kind": "openai"
+            },
+            "anthropic": {
+                "label": "Anthropic Claude",
+                "base_url": "https://api.anthropic.com/v1",
+                "model": "claude-3-5-sonnet-latest",
+                "api_key": "",
+                "kind": "anthropic"
+            },
+            "deepseek": {
+                "label": "DeepSeek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-chat",
+                "api_key": "",
+                "kind": "deepseek"
+            }
+        },
+        "tools": {
+            "run_shell": True, "run_python": True,
+            "read_file": True, "write_file": True, "list_dir": True, "delete_file": True,
+            "web_search": True, "fetch_url": True,
+            "core_memory_append": True, "core_memory_remove": True,
+            "move_mouse": True, "click_mouse": True, "type_text": True, "press_key": True,
+            "see_screen": True, "get_time": True, "calculator": True
+        }
+    };
+}
+
+var _cfg = null;
+
+func load() {
+    if (not file.exists(CONFIG_PATH)) {
+        logger.warn("config.json not found, generating default at " + CONFIG_PATH);
+        _cfg = default_config();
+        save(_cfg);
+        return _cfg;
+    }
+    var raw = file.read_all(CONFIG_PATH);
+    if (raw == null or raw == "") {
+        logger.warn("config.json is empty, using defaults");
+        _cfg = default_config();
+        return _cfg;
+    }
+    var decoded = json.decode(raw);
+    if (decoded == null) {
+        logger.error("config.json is malformed, using defaults");
+        _cfg = default_config();
+        return _cfg;
+    }
+    
+    _cfg = decoded;
+    
+    // Auto-patch existing configs to include security without wiping data
+    if (not _cfg.contains("security")) {
+        _cfg.set("security", default_config().get("security"));
+        save(_cfg);
+        logger.ok("Patched config.json with new security credentials.");
+    }
+    
+    return _cfg;
+}
+
+func save(c) {
+    if (c == null) { c = _cfg; }
+    file.write(CONFIG_PATH, json.encode(c));
+    _cfg = c;
+}
+
+func get() {
+    if (_cfg == null) { load(); }
+    return _cfg;
+}
+
+func active_provider() {
+    var c = get();
+    var key = c.get("agent").get("active_provider");
+    var providers = c.get("providers");
+    if (not providers.contains(key)) {
+        logger.error("active_provider '" + key + "' not found in providers map");
+        return null;
+    }
+    var p = providers.get(key);
+    p.set("__key__", key);
+    return p;
+}
+
+func set_active_provider(key) {
+    var c = get();
+    c.get("agent").set("active_provider", key);
+    save(c);
+}
+
+func update_provider(key, field, value) {
+    var c = get();
+    if (not c.get("providers").contains(key)) {
+        c.get("providers").set(key, {
+            "label": key,
+            "base_url": "",
+            "model": "",
+            "api_key": "",
+            "kind": "openai"
+        });
+    }
+    c.get("providers").get(key).set(field, value);
+    save(c);
+}
+
+func update_agent(field, value) {
+    var c = get();
+    c.get("agent").set(field, value);
+    save(c);
+}
+
+func toggle_tool(name, enabled) {
+    var c = get();
+    c.get("tools").set(name, enabled);
+    save(c);
+}

@@ -1,0 +1,151 @@
+import "json"
+import "net"
+
+func format_tools(tools) {
+    var out = [];
+    for t in tools {
+        out.push({
+            "name": t.get("name"),
+            "description": t.get("description"),
+            "input_schema": t.get("parameters")
+        });
+    }
+    return out;
+}
+
+
+func format_messages(messages) {
+    var system_text = "";
+    var out = [];
+
+    var i = 0;
+    var n = len(messages);
+    while (i < n) {
+        var m = messages[i];
+        var role = m.get("role");
+
+        if (role == "system") {
+            if (system_text != "") { system_text = system_text + "\n\n"; }
+            system_text = system_text + str(m.get("content") ?? "");
+            i = i + 1;
+            continue;
+        }
+
+        if (role == "user") {
+            out.push({ "role": "user", "content": str(m.get("content") ?? "") });
+            i = i + 1;
+            continue;
+        }
+
+        if (role == "assistant") {
+            var blocks = [];
+            var txt = str(m.get("content") ?? "");
+            if (txt != "") {
+                blocks.push({ "type": "text", "text": txt });
+            }
+            if (m.contains("tool_calls") and m.get("tool_calls") != null) {
+                for c in m.get("tool_calls") {
+                    var args = c.get("function").get("arguments");
+                    if (typeof(args) == "string") {
+                        var decoded = json.decode(args);
+                        if (decoded != null) { args = decoded; }
+                    }
+                    blocks.push({
+                        "type": "tool_use",
+                        "id": c.get("id") ?? "",
+                        "name": c.get("function").get("name") ?? "",
+                        "input": args ?? {}
+                    });
+                }
+            }
+            if (len(blocks) == 0) {
+                blocks.push({ "type": "text", "text": "" });
+            }
+            out.push({ "role": "assistant", "content": blocks });
+            i = i + 1;
+            continue;
+        }
+
+        if (role == "tool") {
+           
+            var tool_blocks = [];
+            while (i < n and messages[i].get("role") == "tool") {
+                var tm = messages[i];
+                tool_blocks.push({
+                    "type": "tool_result",
+                    "tool_use_id": str(tm.get("tool_call_id") ?? ""),
+                    "content": str(tm.get("content") ?? "")
+                });
+                i = i + 1;
+            }
+            out.push({ "role": "user", "content": tool_blocks });
+            continue;
+        }
+
+
+        i = i + 1;
+    }
+
+    return { "system": system_text, "messages": out };
+}
+
+async func chat(messages, tools, provider_cfg, agent_cfg) {
+    var base = provider_cfg.get("base_url");
+    if (base.ends_with("/")) { base = base.substring(0, len(base) - 1); }
+    var url = base + "/messages";
+
+    var formatted = format_messages(messages);
+    var body = {
+        "model": provider_cfg.get("model"),
+        "max_tokens": agent_cfg.get("max_tokens") ?? 2048,
+        "temperature": agent_cfg.get("temperature") ?? 0.7,
+        "messages": formatted.get("messages")
+    };
+    if (formatted.get("system") != "") {
+        body.set("system", formatted.get("system"));
+    }
+    if (tools != null and len(tools) > 0) {
+        body.set("tools", format_tools(tools));
+    }
+
+    var headers = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01"
+    };
+    var key = provider_cfg.get("api_key");
+    if (key == null or key == "") {
+        return { "error": "Anthropic API key is empty. Open Settings and add your key.", "text": "", "tool_calls": [] };
+    }
+    headers.set("x-api-key", key);
+
+    var res = await net.http_post(url, json.encode(body), headers);
+    if (res.get("status") != 200) {
+        return {
+            "error": "Anthropic HTTP " + str(res.get("status")) + ": " + str(res.get("body")),
+            "text": "",
+            "tool_calls": []
+        };
+    }
+
+    var data = json.decode(res.get("body"));
+    if (data == null or not data.contains("content")) {
+        return { "error": "Bad Anthropic response shape", "text": "", "tool_calls": [] };
+    }
+
+    var text = "";
+    var calls = [];
+    for block in data.get("content") {
+        var t = block.get("type");
+        if (t == "text") {
+            text = text + (block.get("text") ?? "");
+        } elif (t == "tool_use") {
+            calls.push({
+                "id": block.get("id") ?? "",
+                "name": block.get("name") ?? "",
+                "args": block.get("input") ?? {}
+            });
+        }
+    }
+
+    return { "error": null, "text": text, "tool_calls": calls, "raw": data };
+}

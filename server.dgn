@@ -1,0 +1,247 @@
+import "file"
+import "json"
+import "net"
+import "config"
+import "memory" as mem
+import "sessions"
+import "agent"
+import "ui"
+import "logger"
+
+func _send_json(res, obj, status) {
+    if (status == null) { status = 200; }
+    var body = json.encode(obj);
+    res.send(body, status, {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*"
+    });
+}
+
+func _send_text(res, txt, status, content_type) {
+    if (status == null) { status = 200; }
+    if (content_type == null) { content_type = "text/plain"; }
+    res.send(txt, status, { "Content-Type": content_type });
+}
+
+func _path_only(full_path) {
+    var qpos = full_path.index_of("?");
+    if (qpos >= 0) { return full_path.substring(0, qpos); }
+    return full_path;
+}
+
+func _get_query_param(full_path, param) {
+    var p = param + "=";
+    var idx = full_path.index_of(p);
+    if (idx >= 0) {
+        var rest = full_path.substring(idx + len(p), len(full_path));
+        var ampersand = rest.index_of("&");
+        if (ampersand >= 0) {
+            return rest.substring(0, ampersand);
+        }
+        return rest;
+    }
+    return null;
+}
+
+func _match_session_id(path) {
+    var prefix = "/api/sessions/";
+    if (not path.starts_with(prefix)) { return null; }
+    var rest = path.substring(len(prefix), len(path));
+    if (rest == "" or rest.contains("/")) { return null; }
+    return rest;
+}
+
+async func handler(req, res) {
+    var method = req.get("method");
+    var raw_path = req.get("path");
+    var path = _path_only(raw_path);
+
+    if (method == "OPTIONS") {
+        res.send("", 204, {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+        });
+        return;
+    }
+
+    var sec = config.get().get("security");
+    if (sec != null and sec.get("enabled") == True) {
+        var is_public = (path == "/" or path == "/index.html" or path == "/api/health" or path == "/api/login");
+        if (not is_public) {
+            var token = _get_query_param(raw_path, "token");
+            if (token != sec.get("token")) {
+                _send_json(res, { "error": "Unauthorized Access" }, 401);
+                return;
+            }
+        }
+    }
+
+    if (method == "GET" and (path == "/" or path == "/index.html")) {
+        if (not file.exists("wyrm_ui.html")) { ui.generate(); }
+        var html = file.read_all("wyrm_ui.html") ?? "";
+        _send_text(res, html, 200, "text/html; charset=utf-8");
+        return;
+    }
+
+    if (method == "GET" and path == "/api/health") {
+        _send_json(res, { "ok": True, "agent": config.get().get("agent").get("name") }, 200);
+        return;
+    }
+
+
+    if (method == "POST" and path == "/api/login") {
+        var b_raw = req.get("body");
+        var b = {};
+        if (b_raw != null and b_raw != "") { b = json.decode(b_raw) ?? {}; }
+        var sec_cfg = config.get().get("security") ?? {};
+        
+        if (b.get("username") == sec_cfg.get("username") and b.get("password") == sec_cfg.get("password")) {
+            _send_json(res, { "ok": True, "token": sec_cfg.get("token") }, 200);
+        } else {
+            _send_json(res, { "error": "Invalid credentials" }, 401);
+        }
+        return;
+    }
+
+
+    if (method == "POST" and path == "/api/change-password") {
+        var pw_body = json.decode(req.get("body"));
+        if (pw_body == null) {
+            _send_json(res, { "error": "invalid JSON body" }, 400);
+            return;
+        }
+        var cur_pw = pw_body.get("current_password");
+        var new_pw = pw_body.get("new_password");
+        var pw_cfg = config.get();
+        var sec_obj = pw_cfg.get("security") ?? {};
+        if (cur_pw == null or str(cur_pw) != str(sec_obj.get("password"))) {
+            _send_json(res, { "error": "Current password is incorrect" }, 400);
+            return;
+        }
+        if (new_pw == null or str(new_pw) == "" or len(str(new_pw)) < 4) {
+            _send_json(res, { "error": "New password must be at least 4 characters" }, 400);
+            return;
+        }
+        sec_obj.set("password", str(new_pw));
+        pw_cfg.set("security", sec_obj);
+        config.save(pw_cfg);
+        logger.ok("password changed");
+        _send_json(res, { "ok": True }, 200);
+        return;
+    }
+
+    if (method == "GET" and path == "/api/settings") {
+        _send_json(res, { "config": config.get() }, 200);
+        return;
+    }
+    
+    if (method == "POST" and path == "/api/settings") {
+        var body = json.decode(req.get("body"));
+        if (body == null or not body.contains("config")) {
+            _send_json(res, { "error": "missing 'config'" }, 400);
+            return;
+        }
+        config.save(body.get("config"));
+        logger.ok("settings saved");
+        _send_json(res, { "ok": True }, 200);
+        return;
+    }
+
+    if (method == "GET" and path == "/api/memory") {
+        _send_json(res, { "memory": mem.load() }, 200);
+        return;
+    }
+    
+    if (method == "POST" and path == "/api/memory/clear") {
+        mem.clear_all();
+        _send_json(res, { "ok": True }, 200);
+        return;
+    }
+
+    if (method == "GET" and path == "/api/sessions") {
+        _send_json(res, { "sessions": sessions.list_summaries() }, 200);
+        return;
+    }
+    
+    if (method == "POST" and path == "/api/sessions") {
+        var id = sessions.create();
+        _send_json(res, { "id": id }, 200);
+        return;
+    }
+
+    var sid = _match_session_id(path);
+    if (sid != null) {
+        if (method == "GET") {
+            var s = sessions.get(sid);
+            if (s == null) { _send_json(res, { "error": "not found" }, 404); return; }
+            _send_json(res, { "id": sid, "messages": s.get("messages"), "title": s.get("title") }, 200);
+            return;
+        }
+        if (method == "DELETE") {
+            var ok = sessions.delete(sid);
+            _send_json(res, { "ok": ok }, ok ? 200 : 404);
+            return;
+        }
+    }
+
+    if (method == "POST" and path == "/api/chat") {
+        var body = json.decode(req.get("body"));
+        if (body == null) { _send_json(res, { "error": "invalid JSON body" }, 400); return; }
+        
+        var session_id = body.get("session_id");
+        var msg = body.get("message");
+        
+        if (session_id == null or session_id == "" or not sessions.exists(session_id)) {
+            session_id = sessions.create();
+        }
+        if (msg == null or str(msg) == "") {
+            _send_json(res, { "error": "empty message" }, 400);
+            return;
+        }
+        
+        logger.user("(" + str(session_id).substring(0, 8) + ") " + str(msg));
+        var result = null;
+        try {
+            result = await agent.run(session_id, str(msg));
+        } catch (e) {
+            logger.error("agent crashed: " + str(e));
+            _send_json(res, { "error": "agent crashed: " + str(e) }, 500);
+            return;
+        }
+        
+        logger.agent("done in " + str(len(result.get("steps"))) + " events");
+        var payload = {
+            "session_id": session_id,
+            "final": result.get("final"),
+            "trace": result.get("steps")
+        };
+        
+        var encoded = "";
+        try {
+            encoded = json.encode(payload);
+        } catch (e) {
+            logger.error("response encode failed: " + str(e));
+            encoded = json.encode({
+                "session_id": session_id,
+                "final": "Response too large or contains invalid bytes — see terminal for full output.",
+                "trace": []
+            });
+        }
+        res.send(encoded, 200, {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+        });
+        return;
+    }
+
+    _send_text(res, "Not Found: " + method + " " + path, 404, "text/plain");
+}
+
+func start() {
+    var c = config.get();
+    var port = int(c.get("server").get("port") ?? 8080);
+    ui.generate();
+    net.start_http_server(port, handler);
+    return port;
+}

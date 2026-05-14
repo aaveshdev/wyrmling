@@ -1,0 +1,48 @@
+import "file"
+import "json"
+
+var MEMORY_FILE = "wyrm_memory.json";
+
+func load() {
+    if (not file.exists(MEMORY_FILE)) { return {}; }
+    var content = file.read_all(MEMORY_FILE);
+    if (content == null or content == "") { return {}; }
+    return json.decode(content) ?? {};
+}
+
+func save(mem) {
+    file.write(MEMORY_FILE, json.encode(mem));
+}
+
+func append(key, value) {
+    if (key == null or value == null) { return False; }
+    var mem = load();
+    mem.set(str(key), str(value));
+    save(mem);
+    return True;
+}
+
+func remove(key) {
+    if (key == null) { return False; }
+    var mem = load();
+    if (mem.contains(key)) {
+        mem.remove(key);
+        save(mem);
+        return True;
+    }
+    return False;
+}
+
+func clear_all() {
+    save({});
+}
+
+func render() {
+    var mem = load();
+    if (len(mem) == 0) { return "(no facts saved yet)"; }
+    var lines = [];
+    for k in mem.keys() {
+        lines.push("- " + k + ": " + str(mem.get(k)));
+    }
+    return lines.join("\n");
+}

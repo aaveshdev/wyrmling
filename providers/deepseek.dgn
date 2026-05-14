@@ -1,0 +1,146 @@
+import "json"
+import "net"
+
+func format_tools(tools) {
+    var out = [];
+    for t in tools {
+        out.push({
+            "type": "function",
+            "function": {
+                "name": t.get("name"),
+                "description": t.get("description"),
+                "parameters": t.get("parameters")
+            }
+        });
+    }
+    return out;
+}
+
+func format_messages(messages) {
+    var out = [];
+    for m in messages {
+        var role = m.get("role");
+
+        if (role == "tool") {
+            out.push({
+                "role": "tool",
+                "tool_call_id": m.get("tool_call_id") ?? "",
+                "content": str(m.get("content") ?? "")
+            });
+        } else {
+            var copy = {
+                "role": role,
+                "content": m.get("content") ?? ""
+            };
+
+            if (m.contains("tool_calls") and m.get("tool_calls") != null) {
+                var calls = [];
+                for c in m.get("tool_calls") {
+                    var args_str = c.get("function").get("arguments");
+
+                    if (typeof(args_str) != "string") {
+                        args_str = json.encode(args_str);
+                    }
+
+                    calls.push({
+                        "id": c.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": c.get("function").get("name"),
+                            "arguments": args_str
+                        }
+                    });
+                }
+                copy.set("tool_calls", calls);
+            }
+
+            out.push(copy);
+        }
+    }
+    return out;
+}
+
+async func chat(messages, tools, provider_cfg, agent_cfg) {
+    var base = provider_cfg.get("base_url") ?? "https://api.deepseek.com";
+    if (base.ends_with("/")) {
+        base = base.substring(0, len(base) - 1);
+    }
+
+    var url = base + "/chat/completions";
+
+    var body = {
+        "model": provider_cfg.get("model") ?? "deepseek-chat",
+        "messages": format_messages(messages),
+        "temperature": agent_cfg.get("temperature") ?? 0.7,
+        "max_tokens": agent_cfg.get("max_tokens") ?? 2048
+    };
+
+    if (tools != null and len(tools) > 0) {
+        body.set("tools", format_tools(tools));
+    }
+
+    var headers = {
+        "Content-Type": "application/json"
+    };
+
+    var key = provider_cfg.get("api_key");
+    if (key == null or key == "") {
+        return {
+            "error": "DeepSeek API key missing",
+            "text": "",
+            "tool_calls": []
+        };
+    }
+
+    headers.set("Authorization", "Bearer " + key);
+    var res = await net.http_post(url, json.encode(body), headers);
+    if (res.get("status") != 200) {
+        return {
+            "error": "DeepSeek HTTP " + str(res.get("status")) + ": " + str(res.get("body")),
+            "text": "",
+            "tool_calls": []
+        };
+    }
+
+    var data = json.decode(res.get("body"));
+
+    if (data == null or not data.contains("choices") or len(data.get("choices")) == 0) {
+        return {
+            "error": "Bad DeepSeek response",
+            "text": "",
+            "tool_calls": []
+        };
+    }
+
+    var msg = data.get("choices")[0].get("message");
+
+    var text = msg.get("content") ?? "";
+    var calls = [];
+
+    if (msg.contains("tool_calls") and msg.get("tool_calls") != null) {
+        for c in msg.get("tool_calls") {
+            var fn = c.get("function") ?? {};
+            var args = fn.get("arguments");
+
+            if (typeof(args) == "string") {
+                var decoded = json.decode(args);
+                if (decoded != null) {
+                    args = decoded;
+                }
+            }
+
+            calls.push({
+                "id": c.get("id") ?? "deepseek_call",
+                "name": fn.get("name") ?? "",
+                "args": args ?? {}
+            });
+        }
+    }
+
+    return {
+        "error": null,
+        "text": text,
+        "tool_calls": calls,
+        "raw": data
+    };
+}

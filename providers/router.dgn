@@ -1,0 +1,28 @@
+import "ollama"
+import "openai" as oai
+import "anthropic" as anth
+import "deepseek" as ds
+
+async func chat(messages, tools, provider_cfg, agent_cfg) {
+    var kind = provider_cfg.get("kind") ?? "ollama";
+
+    if (kind == "ollama") {
+        return await ollama.chat(messages, tools, provider_cfg, agent_cfg);
+    }
+    if (kind == "openai") {
+        return await oai.chat(messages, tools, provider_cfg, agent_cfg);
+    }
+    if (kind == "anthropic") {
+        return await anth.chat(messages, tools, provider_cfg, agent_cfg);
+    }
+
+    if (kind == "deepseek") {
+        return await ds.chat(messages, tools, provider_cfg, agent_cfg);
+    }
+
+    return {
+        "error": "Unknown provider kind: " + str(kind),
+        "text": "",
+        "tool_calls": []
+    };
+}
